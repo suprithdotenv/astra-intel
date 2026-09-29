@@ -10,53 +10,47 @@ client = Groq(
 )
 
 
-def generate_answer(query: str, chunks):
+def generate_answer(question: str, chunks, previous_messages=None):
 
     context = "\n\n".join(
-        [
-            f"Page {chunk.page_number}:\n{chunk.content}"
-            for chunk in chunks
-        ]
+        f"[Page {chunk.page_number}]\n{chunk.content}"
+        for chunk in chunks
     )
+
+    history = ""
+
+    if previous_messages:
+        history = "\n".join(
+            f"User: {m.question}\nAssistant: {m.answer}"
+            for m in previous_messages[-5:]
+        )
 
     prompt = f"""
 You are ASTRA, a document intelligence assistant.
 
-Answer the user's question using ONLY the information
-provided in the document context.
+Answer ONLY using the provided document context.
 
-If the answer is not present in the context, say:
-"I could not find the answer in the provided document."
+Previous conversation:
+{history}
 
-DOCUMENT CONTEXT:
+Document context:
 {context}
 
-USER QUESTION:
-{query}
+Current question:
+{question}
 
-Give a concise and accurate answer.
+If the answer is not supported by the document, say:
+"I couldn't find this information in the provided document."
+
+Cite the relevant page numbers.
 """
 
-    try:
-        response = client.chat.completions.create(
-            model="qwen/qwen3.8-27b",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are ASTRA, a document intelligence assistant."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.2,
-            max_tokens=300
-        )
+    response = client.chat.completions.create(
+        model="qwen/qwen3.8-27b",
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0
+    )
 
-        return response.choices[0].message.content
-
-    except Exception as e:
-        print("Groq API error:", e)
-
-        return "The AI model is temporarily unavailable. Please try again."
+    return response.choices[0].message.content

@@ -13,6 +13,8 @@ import shutil
 from app.models.conversation import Conversation
 from app.models.message import Message
 
+from app.models.document import Document, DocumentChunk
+
 
 
 
@@ -25,6 +27,7 @@ Base.metadata.create_all(bind=engine)
 class SearchRequest(BaseModel):
     query: str
     limit: int = 5
+    conversation_id: int | None = None
 
 
 
@@ -54,14 +57,14 @@ def upload_pdf(file: UploadFile = File(...)):
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    chunk_count = process_document(
+    document_id, chunk_count = process_document(
         file_path,
         file.filename
     )
-
     return {
         "message": "Document processed successfully",
         "document": file.filename,
+        "document_id": document_id,
         "chunks": chunk_count
     }
 
@@ -96,10 +99,34 @@ def ask(request: SearchRequest):
     db = SessionLocal()
 
     try:
-        conversation = Conversation()
-        db.add(conversation)
-        db.commit()
-        db.refresh(conversation)
+        # Use existing conversation or create a new one
+        if request.conversation_id:
+            conversation = (
+                db.query(Conversation)
+                .filter(
+                    Conversation.id == request.conversation_id
+                )
+                .first()
+            )
+
+            if not conversation:
+                return {"error": "Conversation not found"}
+
+        else:
+            conversation = Conversation()
+            db.add(conversation)
+            db.commit()
+            db.refresh(conversation)
+
+
+        previous_messages = (
+            db.query(Message)
+            .filter(
+                Message.conversation_id == conversation.id
+            )
+            .order_by(Message.created_at)
+            .all()
+        )
 
         chunks = search_documents(
             request.query,
@@ -108,9 +135,11 @@ def ask(request: SearchRequest):
 
         answer = generate_answer(
             request.query,
-            chunks
+            chunks,
+            previous_messages
         )
 
+        # Save message
         message = Message(
             conversation_id=conversation.id,
             question=request.query,
@@ -138,6 +167,109 @@ def ask(request: SearchRequest):
 
 
 
+
+
+
+@app.get("/conversations")
+def get_conversations():
+
+    db = SessionLocal()
+
+    try:
+        conversations = (
+            db.query(Conversation)
+            .order_by(Conversation.created_at.desc())
+            .all()
+        )
+
+        return [
+            {
+                "id": c.id,
+                "created_at": c.created_at
+            }
+            for c in conversations
+        ]
+
+    finally:
+        db.close()
+
+
+
+
+
+@app.get("/conversations/{conversation_id}")
+def get_conversation(conversation_id: int):
+
+    db = SessionLocal()
+
+    try:
+        messages = (
+            db.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at)
+            .all()
+        )
+
+        return [
+            {
+                "question": message.question,
+                "answer": message.answer,
+                "created_at": message.created_at
+            }
+            for message in messages
+        ]
+
+    finally:
+        db.close()
+
+
+
+
+
+@app.post("/documents/{document_id}/summary")
+def generate_document_summary(document_id: int):
+    db = SessionLocal()
+
+    try:
+        document = (
+            db.query(Document)
+            .filter(Document.id == document_id)
+            .first()
+        )
+
+        if not document:
+            return {"error": "Document not found"}
+
+        chunks = (
+            db.query(DocumentChunk)
+            .filter(DocumentChunk.document_id == document_id)
+            .order_by(DocumentChunk.page_number)
+            .all()
+        )
+
+        if not chunks:
+            return {"error": "No content found for this document"}
+
+
+        content = "\n\n".join(
+            chunk.content for chunk in chunks
+        )
+
+        summary = generate_answer(
+            "Provide a concise summary of this document. "
+            "Cover the main topic, key points, and important conclusions. "
+            "Do not add information that is not present in the document.",
+            chunks
+        )
+
+        return {
+            "document_id": document.id,
+            "document": document.filename,
+            "summary": summary
+        }
+
+    finally:
+        db.close()
 
 
 
