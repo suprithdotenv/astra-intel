@@ -6,7 +6,7 @@ from app.services.search_service import search_documents
 from sqlalchemy import text
 
 from app.services.ingestion_service import process_document
-
+from app.services.llm_service import generate_answer
 import os
 import shutil
 
@@ -82,5 +82,36 @@ def search(request: SearchRequest):
             for result in results
         ]
     }
+
+
+
+
+@app.post("/ask")
+def ask(request: SearchRequest):
+
+    chunks = search_documents(
+        request.query,
+        request.limit
+    )
+
+    answer = generate_answer(
+        request.query,
+        chunks
+    )
+
+    return {
+        "question": request.query,
+        "answer": answer,
+        "sources": [
+            {
+                "page": chunk.page_number,
+                "content": chunk.content
+            }
+            for chunk in chunks
+        ]
+    }
+
+
+
 
 
