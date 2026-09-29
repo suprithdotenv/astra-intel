@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File
-from app.database import engine, Base
+from app.database import engine, Base,SessionLocal
 from pydantic import BaseModel
 from app.services.search_service import search_documents
 
@@ -9,6 +9,10 @@ from app.services.ingestion_service import process_document
 from app.services.llm_service import generate_answer
 import os
 import shutil
+
+from app.models.conversation import Conversation
+from app.models.message import Message
+
 
 
 
@@ -89,27 +93,51 @@ def search(request: SearchRequest):
 @app.post("/ask")
 def ask(request: SearchRequest):
 
-    chunks = search_documents(
-        request.query,
-        request.limit
-    )
+    db = SessionLocal()
 
-    answer = generate_answer(
-        request.query,
-        chunks
-    )
+    try:
+        conversation = Conversation()
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
 
-    return {
-        "question": request.query,
-        "answer": answer,
-        "sources": [
-            {
-                "page": chunk.page_number,
-                "content": chunk.content
-            }
-            for chunk in chunks
-        ]
-    }
+        chunks = search_documents(
+            request.query,
+            request.limit
+        )
+
+        answer = generate_answer(
+            request.query,
+            chunks
+        )
+
+        message = Message(
+            conversation_id=conversation.id,
+            question=request.query,
+            answer=answer
+        )
+
+        db.add(message)
+        db.commit()
+
+        return {
+            "conversation_id": conversation.id,
+            "question": request.query,
+            "answer": answer,
+            "sources": [
+                {
+                    "page": chunk.page_number,
+                    "content": chunk.content
+                }
+                for chunk in chunks
+            ]
+        }
+
+    finally:
+        db.close()
+
+
+
 
 
 
