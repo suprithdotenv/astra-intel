@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File
 from app.database import engine, Base
-from app.models.document import DocumentChunk
+from pydantic import BaseModel
+from app.services.search_service import search_documents
 
 from sqlalchemy import text
 
@@ -15,6 +16,11 @@ app = FastAPI()
 
 
 Base.metadata.create_all(bind=engine)
+
+
+class SearchRequest(BaseModel):
+    query: str
+    limit: int = 5
 
 
 
@@ -54,3 +60,27 @@ def upload_pdf(file: UploadFile = File(...)):
         "document": file.filename,
         "chunks": chunk_count
     }
+
+
+
+
+
+@app.post("/search")
+def search(request: SearchRequest):
+
+    results = search_documents(
+        request.query,
+        request.limit
+    )
+
+    return {
+        "results": [
+            {
+                "page": result.page_number,
+                "content": result.content,
+            }
+            for result in results
+        ]
+    }
+
+
