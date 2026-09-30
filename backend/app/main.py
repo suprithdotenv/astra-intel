@@ -13,8 +13,6 @@ from app.models.document import Document, DocumentChunk
 
 import os
 import shutil
-import time
-
 
 app = FastAPI()
 
@@ -189,38 +187,21 @@ def ask(request: SearchRequest):
             .all()
         )
 
-        total_start = time.perf_counter()
-
-        retrieval_start = time.perf_counter()
         chunks = search_documents(
             request.query,
             request.limit
         )
-        retrieval_time = time.perf_counter() - retrieval_start
 
-        answer_start = time.perf_counter()
         answer = generate_answer(
             request.query,
             chunks,
             previous_messages
         )
-        answer_time = time.perf_counter() - answer_start
 
-        verification_start = time.perf_counter()
         verification = verify_answer(
             request.query,
             answer,
             chunks
-        )
-        verification_time = time.perf_counter() - verification_start
-
-        total_time = time.perf_counter() - total_start
-
-        print(
-            f"ASTRA TIMING | Retrieval: {retrieval_time:.2f}s | "
-            f"Answer: {answer_time:.2f}s | "
-            f"Verification: {verification_time:.2f}s | "
-            f"Total: {total_time:.2f}s"
         )
 
         message = Message(
