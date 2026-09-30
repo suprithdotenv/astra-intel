@@ -2,6 +2,7 @@ import os
 
 from dotenv import load_dotenv
 from groq import Groq
+import json
 
 load_dotenv()
 
@@ -50,7 +51,8 @@ Cite the relevant page numbers.
         messages=[
             {"role": "user", "content": prompt}
         ],
-        temperature=0
+        temperature=0,
+        max_tokens=800
     )
 
     return response.choices[0].message.content
@@ -98,7 +100,8 @@ Mention relevant page numbers when possible.
         messages=[
             {"role": "user", "content": prompt}
         ],
-        temperature=0
+        temperature=0,
+        max_tokens=800
     )
 
     return response.choices[0].message.content
@@ -106,4 +109,61 @@ Mention relevant page numbers when possible.
 
 
 
+def verify_answer(question, answer, chunks):
+    context = "\n\n".join(
+        f"[Page {chunk.page_number}]\n{chunk.content}"
+        for chunk in chunks
+    )
 
+    prompt = f"""
+You are ASTRA's evidence verification system.
+
+Verify whether the answer is fully supported by the provided document evidence.
+
+Question:
+{question}
+
+Answer:
+{answer}
+
+Evidence:
+{context}
+
+Return ONLY valid JSON in this exact format:
+{{
+  "grounded": true,
+  "confidence": 0.0,
+  "supported_claims": [
+    {{
+      "claim": "claim from answer",
+      "page": 1,
+      "supported": true
+    }}
+  ],
+  "unsupported_claims": []
+}}
+
+confidence must be between 0 and 1.
+If a claim is not supported by the evidence, mark it unsupported.
+"""
+
+    response = client.chat.completions.create(
+        model="qwen/qwen3.8-27b",
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0,
+        max_tokens=800
+    )
+
+    content = response.choices[0].message.content.strip()
+
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return {
+            "grounded": False,
+            "confidence": 0,
+            "supported_claims": [],
+            "unsupported_claims": []
+        }

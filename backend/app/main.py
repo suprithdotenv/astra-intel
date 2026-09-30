@@ -13,7 +13,7 @@ from app.models.conversation import Conversation
 from app.models.message import Message
 
 from app.models.document import Document, DocumentChunk
-from app.services.llm_service import generate_answer, compare_documents
+from app.services.llm_service import generate_answer, compare_documents,verify_answer
 
 
 
@@ -143,7 +143,13 @@ def ask(request: SearchRequest):
             previous_messages
         )
 
-        # Save message
+        verification = verify_answer(
+            request.query,
+            answer,
+            chunks
+        )
+
+
         message = Message(
             conversation_id=conversation.id,
             question=request.query,
@@ -157,6 +163,7 @@ def ask(request: SearchRequest):
             "conversation_id": conversation.id,
             "question": request.query,
             "answer": answer,
+            "verification": verification,
             "sources": [
                 {
                     "page": chunk.page_number,
