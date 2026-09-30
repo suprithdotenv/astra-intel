@@ -6,7 +6,6 @@ from app.services.search_service import search_documents
 from sqlalchemy import text
 
 from app.services.ingestion_service import process_document
-from app.services.llm_service import generate_answer
 import os
 import shutil
 
@@ -14,7 +13,7 @@ from app.models.conversation import Conversation
 from app.models.message import Message
 
 from app.models.document import Document, DocumentChunk
-
+from app.services.llm_service import generate_answer, compare_documents
 
 
 
@@ -28,6 +27,11 @@ class SearchRequest(BaseModel):
     query: str
     limit: int = 5
     conversation_id: int | None = None
+
+class CompareRequest(BaseModel):
+    document_id_1: int
+    document_id_2: int
+
 
 
 
@@ -251,9 +255,7 @@ def generate_document_summary(document_id: int):
             return {"error": "No content found for this document"}
 
 
-        content = "\n\n".join(
-            chunk.content for chunk in chunks
-        )
+
 
         summary = generate_answer(
             "Provide a concise summary of this document. "
@@ -273,5 +275,67 @@ def generate_document_summary(document_id: int):
 
 
 
+@app.post("/documents/compare")
+def compare_documents_endpoint(request: CompareRequest):
 
+    db = SessionLocal()
+
+    try:
+        document1 = (
+            db.query(Document)
+            .filter(Document.id == request.document_id_1)
+            .first()
+        )
+
+        document2 = (
+            db.query(Document)
+            .filter(Document.id == request.document_id_2)
+            .first()
+        )
+
+        if not document1 or not document2:
+            return {"error": "One or both documents not found"}
+
+        chunks1 = (
+            db.query(DocumentChunk)
+            .filter(
+                DocumentChunk.document_id == document1.id
+            )
+            .order_by(DocumentChunk.page_number)
+            .all()
+        )
+
+        chunks2 = (
+            db.query(DocumentChunk)
+            .filter(
+                DocumentChunk.document_id == document2.id
+            )
+            .order_by(DocumentChunk.page_number)
+            .all()
+        )
+
+        if not chunks1 or not chunks2:
+            return {"error": "One or both documents contain no content"}
+
+        comparison = compare_documents(
+            document1.filename,
+            document2.filename,
+            chunks1,
+            chunks2
+        )
+
+        return {
+            "document_1": {
+                "id": document1.id,
+                "name": document1.filename
+            },
+            "document_2": {
+                "id": document2.id,
+                "name": document2.filename
+            },
+            "comparison": comparison
+        }
+
+    finally:
+        db.close()
 

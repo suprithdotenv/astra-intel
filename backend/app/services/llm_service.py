@@ -54,3 +54,56 @@ Cite the relevant page numbers.
     )
 
     return response.choices[0].message.content
+
+
+
+
+def compare_documents(document1_name, document2_name, chunks1, chunks2):
+
+    context1 = "\n\n".join(
+        f"[Page {chunk.page_number}]\n{chunk.content}"
+        for chunk in chunks1
+    )
+
+    context2 = "\n\n".join(
+        f"[Page {chunk.page_number}]\n{chunk.content}"
+        for chunk in chunks2
+    )
+
+    prompt = f"""
+You are ASTRA, a document intelligence assistant.
+
+Compare the following two documents using ONLY the provided content.
+
+DOCUMENT 1: {document1_name}
+{context1}
+
+DOCUMENT 2: {document2_name}
+{context2}
+
+Provide:
+
+1. Main topic of each document
+2. Key points of Document 1
+3. Key points of Document 2
+4. Similarities
+5. Differences
+
+Do not add information that is not present in the documents.
+Mention relevant page numbers when possible.
+"""
+
+    response = client.chat.completions.create(
+        model="qwen/qwen3.8-27b",
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0
+    )
+
+    return response.choices[0].message.content
+
+
+
+
+
