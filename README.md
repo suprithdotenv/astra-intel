@@ -21,8 +21,6 @@ ASTRA INTEL is a document intelligence platform for analysing technical and defe
 
 ## Architecture
 
-The complete architecture is available in [`architecture.mmd`](./architecture.mmd).
-
 ```mermaid
 flowchart LR
     U["User"] --> UI["React + Vite<br/>Document Intelligence UI"]
