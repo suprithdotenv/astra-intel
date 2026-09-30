@@ -1,8 +1,9 @@
 import os
+import re
+import json
 
 from dotenv import load_dotenv
 from groq import Groq
-import json
 
 load_dotenv()
 
@@ -10,160 +11,283 @@ client = Groq(
     api_key=os.getenv("GROQ_API_KEY")
 )
 
+MODEL = "qwen/qwen3.8-27b"
+MAX_CONTEXT_CHARS = 14000
+MAX_HISTORY_MESSAGES = 4
+MAX_CHARS_PER_HISTORY_MESSAGE = 1200
 
-def generate_answer(question: str, chunks, previous_messages=None):
 
-    context = "\n\n".join(
-        f"[Page {chunk.page_number}]\n{chunk.content}"
-        for chunk in chunks
-    )
+def _build_context(chunks, max_chars=MAX_CONTEXT_CHARS):
+    selected = []
+    total = 0
 
-    history = ""
+    for chunk in chunks:
+        text = chunk.content.strip()
 
-    if previous_messages:
-        history = "\n".join(
-            f"User: {m.question}\nAssistant: {m.answer}"
-            for m in previous_messages[-5:]
+        if not text:
+            continue
+
+        remaining = max_chars - total
+
+        if remaining <= 0:
+            break
+
+        if len(text) > remaining:
+            text = text[:remaining]
+
+        selected.append(
+            f"[Page {chunk.page_number}]\n{text}"
         )
 
-    prompt = f"""
-You are ASTRA, a document intelligence assistant.
+        total += len(text)
 
-Answer ONLY using the provided document context.
+    return "\n\n".join(selected)
 
-Previous conversation:
-{history}
 
-Document context:
+def _build_history(previous_messages):
+    if not previous_messages:
+        return ""
+
+    history = []
+
+    for message in previous_messages[-MAX_HISTORY_MESSAGES:]:
+        question = message.question.strip()[:MAX_CHARS_PER_HISTORY_MESSAGE]
+        answer = message.answer.strip()[:MAX_CHARS_PER_HISTORY_MESSAGE]
+
+        history.append(
+            f"User: {question}\nAssistant: {answer}"
+        )
+
+    return "\n\n".join(history)
+
+
+def generate_answer(question: str, chunks, previous_messages=None):
+    context = _build_context(chunks)
+    history = _build_history(previous_messages)
+
+    history_section = (
+        f"\nPrevious conversation:\n{history}\n"
+        if history
+        else ""
+    )
+
+    prompt = f"""You are ASTRA, a grounded document intelligence assistant.
+
+Answer ONLY from the provided document evidence.
+
+Rules:
+- Never use outside knowledge.
+- Never invent, estimate, guess, or infer unsupported facts.
+- Every factual statement must be supported by the evidence.
+- Cite relevant page numbers naturally as [Page X].
+- If related information is present but the exact requested fact is missing, explain what is present and clearly state that the exact fact is not provided.
+- Do not calculate or derive a missing statistic, percentage, date, measurement, or value.
+- Do not claim that the entire document lacks information when only the retrieved evidence lacks it.
+- Answer every part of multi-part questions when evidence is available.
+- For comparisons, cover each requested entity using only the evidence.
+- Keep the answer concise and structured.
+
+{history_section}
+Document evidence:
 {context}
 
 Current question:
 {question}
 
-If the answer is not supported by the document, say:
-"I couldn't find this information in the provided document."
-
-Cite the relevant page numbers.
+Return only the final answer.
 """
 
     response = client.chat.completions.create(
-        model="qwen/qwen3.8-27b",
+        model=MODEL,
         messages=[
             {"role": "user", "content": prompt}
         ],
         temperature=0,
-        max_tokens=800
+        max_tokens=600
     )
 
-    return response.choices[0].message.content
-
-
+    return response.choices[0].message.content.strip()
 
 
 def compare_documents(document1_name, document2_name, chunks1, chunks2):
+    max_chars_per_document = 6500
 
-    context1 = "\n\n".join(
-        f"[Page {chunk.page_number}]\n{chunk.content}"
-        for chunk in chunks1
+    context1 = _build_context(
+        chunks1,
+        max_chars=max_chars_per_document
     )
 
-    context2 = "\n\n".join(
-        f"[Page {chunk.page_number}]\n{chunk.content}"
-        for chunk in chunks2
+    context2 = _build_context(
+        chunks2,
+        max_chars=max_chars_per_document
     )
 
-    prompt = f"""
-You are ASTRA, a document intelligence assistant.
+    prompt = f"""You are ASTRA INTEL, a grounded document comparison system.
 
-Compare the following two documents using ONLY the provided content.
+Compare the two documents using ONLY the evidence provided.
 
-DOCUMENT 1: {document1_name}
+DOCUMENT A:
+{document1_name}
+
 {context1}
 
-DOCUMENT 2: {document2_name}
+DOCUMENT B:
+{document2_name}
+
 {context2}
 
-Provide:
+Cover:
+1. Main topics
+2. Important similarities
+3. Important differences
+4. Distinct information found in either document
 
-1. Main topic of each document
-2. Key points of Document 1
-3. Key points of Document 2
-4. Similarities
-5. Differences
+Use [Page X] references for factual claims.
+Do not invent or infer unsupported information.
+If information is not present in the provided evidence, say that it is not stated.
 
-Do not add information that is not present in the documents.
-Mention relevant page numbers when possible.
+Return only the comparison.
 """
 
     response = client.chat.completions.create(
-        model="qwen/qwen3.8-27b",
+        model=MODEL,
         messages=[
             {"role": "user", "content": prompt}
         ],
         temperature=0,
-        max_tokens=800
+        max_tokens=700
     )
 
-    return response.choices[0].message.content
+    return response.choices[0].message.content.strip()
 
 
+def _normalize(text):
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def _content_tokens(text):
+    return set(
+        token
+        for token in _normalize(text).split()
+        if len(token) >= 4
+    )
+
+
+def _sentence_claims(answer):
+    answer = re.sub(r"```.*?```", " ", answer, flags=re.DOTALL)
+
+    parts = re.split(r"(?<=[.!?])\s+|\n+", answer)
+
+    claims = []
+
+    for part in parts:
+        part = re.sub(r"^[\s\-*#\d.)]+", "", part).strip()
+
+        if len(part) < 20:
+            continue
+
+        if re.match(
+            r"^(source|sources|page|citation|reference)s?\s*:",
+            part,
+            flags=re.IGNORECASE
+        ):
+            continue
+
+        claims.append(part)
+
+    return claims
 
 
 def verify_answer(question, answer, chunks):
-    context = "\n\n".join(
-        f"[Page {chunk.page_number}]\n{chunk.content}"
-        for chunk in chunks
-    )
-
-    prompt = f"""
-You are ASTRA's evidence verification system.
-
-Verify whether the answer is fully supported by the provided document evidence.
-
-Question:
-{question}
-
-Answer:
-{answer}
-
-Evidence:
-{context}
-
-Return ONLY valid JSON in this exact format:
-{{
-  "grounded": true,
-  "confidence": 0.0,
-  "supported_claims": [
-    {{
-      "claim": "claim from answer",
-      "page": 1,
-      "supported": true
-    }}
-  ],
-  "unsupported_claims": []
-}}
-
-confidence must be between 0 and 1.
-If a claim is not supported by the evidence, mark it unsupported.
-"""
-
-    response = client.chat.completions.create(
-        model="qwen/qwen3.8-27b",
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0,
-        max_tokens=800
-    )
-
-    content = response.choices[0].message.content.strip()
-
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
+    if not answer or not chunks:
         return {
             "grounded": False,
             "confidence": 0,
             "supported_claims": [],
-            "unsupported_claims": []
+            "unsupported_claims": [],
+            "evidence_coverage": 0,
+            "abstained": False
         }
+
+    evidence = []
+
+    for chunk in chunks:
+        evidence.append({
+            "page": chunk.page_number,
+            "text": chunk.content,
+            "tokens": _content_tokens(chunk.content)
+        })
+
+    claims = _sentence_claims(answer)
+
+    if not claims:
+        return {
+            "grounded": True,
+            "confidence": 1.0,
+            "supported_claims": [],
+            "unsupported_claims": [],
+            "evidence_coverage": 1.0,
+            "abstained": False
+        }
+
+    supported = []
+    unsupported = []
+
+    for claim in claims:
+        claim_tokens = _content_tokens(claim)
+
+        if not claim_tokens:
+            continue
+
+        best_score = 0
+        best_page = None
+
+        for item in evidence:
+            overlap = len(claim_tokens & item["tokens"])
+            score = overlap / len(claim_tokens)
+
+            if score > best_score:
+                best_score = score
+                best_page = item["page"]
+
+        claim_data = {
+            "claim": claim,
+            "page": best_page,
+            "supported": best_score >= 0.30
+        }
+
+        if best_score >= 0.30:
+            supported.append(claim_data)
+        else:
+            unsupported.append(claim_data)
+
+    total = len(supported) + len(unsupported)
+
+    if total == 0:
+        confidence = 0
+    else:
+        confidence = len(supported) / total
+
+    answer_lower = answer.lower()
+
+    abstained = any(
+        phrase in answer_lower
+        for phrase in [
+            "not provided",
+            "not stated",
+            "not specified",
+            "not mentioned",
+            "does not provide",
+            "is not provided",
+            "cannot be determined"
+        ]
+    )
+
+    return {
+        "grounded": confidence >= 0.70,
+        "confidence": round(confidence, 2),
+        "supported_claims": supported,
+        "unsupported_claims": unsupported,
+        "evidence_coverage": round(confidence, 2),
+        "abstained": abstained
+    }

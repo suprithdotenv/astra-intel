@@ -1,24 +1,30 @@
 from fastapi import FastAPI, UploadFile, File
-from app.database import engine, Base,SessionLocal
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from app.services.search_service import search_documents
-
 from sqlalchemy import text
 
+from app.database import engine, Base, SessionLocal
 from app.services.ingestion_service import process_document
-import os
-import shutil
-
+from app.services.llm_service import generate_answer, compare_documents, verify_answer
+from app.services.search_service import search_documents
 from app.models.conversation import Conversation
 from app.models.message import Message
-
 from app.models.document import Document, DocumentChunk
-from app.services.llm_service import generate_answer, compare_documents,verify_answer
 
+import os
+import shutil
+import time
 
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
 
 Base.metadata.create_all(bind=engine)
 
@@ -28,17 +34,15 @@ class SearchRequest(BaseModel):
     limit: int = 5
     conversation_id: int | None = None
 
+
 class CompareRequest(BaseModel):
     document_id_1: int
     document_id_2: int
 
 
-
-
 @app.get("/")
 def root():
-    return {"message": "Hello World"}
-
+    return {"message": "ASTRA INTEL API is running"}
 
 
 @app.get("/test-db")
@@ -48,15 +52,38 @@ def test_db():
         return {"database": result.scalar()}
 
 
+@app.get("/documents")
+def get_documents():
+    db = SessionLocal()
 
+    try:
+        documents = (
+            db.query(Document)
+            .order_by(Document.created_at.desc())
+            .all()
+        )
+
+        return [
+            {
+                "id": document.id,
+                "name": document.filename,
+                "created_at": document.created_at
+            }
+            for document in documents
+        ]
+
+    finally:
+        db.close()
 
 
 @app.post("/upload")
 def upload_pdf(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".pdf"):
+        return {"error": "Only PDF files are supported"}
 
     os.makedirs("uploads", exist_ok=True)
 
-    file_path = f"uploads/{file.filename}"
+    file_path = os.path.join("uploads", file.filename)
 
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
@@ -65,6 +92,7 @@ def upload_pdf(file: UploadFile = File(...)):
         file_path,
         file.filename
     )
+
     return {
         "message": "Document processed successfully",
         "document": file.filename,
@@ -73,12 +101,45 @@ def upload_pdf(file: UploadFile = File(...)):
     }
 
 
+@app.delete("/documents/{document_id}")
+def delete_document(document_id: int):
+    db = SessionLocal()
 
+    try:
+        document = (
+            db.query(Document)
+            .filter(Document.id == document_id)
+            .first()
+        )
+
+        if not document:
+            return {"error": "Document not found"}
+
+        filename = document.filename
+
+        db.query(DocumentChunk).filter(
+            DocumentChunk.document_id == document_id
+        ).delete(synchronize_session=False)
+
+        db.delete(document)
+        db.commit()
+
+        file_path = os.path.join("uploads", filename)
+
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+        return {
+            "message": "Document deleted successfully",
+            "document_id": document_id
+        }
+
+    finally:
+        db.close()
 
 
 @app.post("/search")
 def search(request: SearchRequest):
-
     results = search_documents(
         request.query,
         request.limit
@@ -89,21 +150,18 @@ def search(request: SearchRequest):
             {
                 "page": result.page_number,
                 "content": result.content,
+                "document": result.document_name
             }
             for result in results
         ]
     }
 
 
-
-
 @app.post("/ask")
 def ask(request: SearchRequest):
-
     db = SessionLocal()
 
     try:
-        # Use existing conversation or create a new one
         if request.conversation_id:
             conversation = (
                 db.query(Conversation)
@@ -122,7 +180,6 @@ def ask(request: SearchRequest):
             db.commit()
             db.refresh(conversation)
 
-
         previous_messages = (
             db.query(Message)
             .filter(
@@ -132,23 +189,39 @@ def ask(request: SearchRequest):
             .all()
         )
 
+        total_start = time.perf_counter()
+
+        retrieval_start = time.perf_counter()
         chunks = search_documents(
             request.query,
             request.limit
         )
+        retrieval_time = time.perf_counter() - retrieval_start
 
+        answer_start = time.perf_counter()
         answer = generate_answer(
             request.query,
             chunks,
             previous_messages
         )
+        answer_time = time.perf_counter() - answer_start
 
+        verification_start = time.perf_counter()
         verification = verify_answer(
             request.query,
             answer,
             chunks
         )
+        verification_time = time.perf_counter() - verification_start
 
+        total_time = time.perf_counter() - total_start
+
+        print(
+            f"ASTRA TIMING | Retrieval: {retrieval_time:.2f}s | "
+            f"Answer: {answer_time:.2f}s | "
+            f"Verification: {verification_time:.2f}s | "
+            f"Total: {total_time:.2f}s"
+        )
 
         message = Message(
             conversation_id=conversation.id,
@@ -167,7 +240,8 @@ def ask(request: SearchRequest):
             "sources": [
                 {
                     "page": chunk.page_number,
-                    "content": chunk.content
+                    "content": chunk.content,
+                    "document": chunk.document_name
                 }
                 for chunk in chunks
             ]
@@ -177,13 +251,8 @@ def ask(request: SearchRequest):
         db.close()
 
 
-
-
-
-
 @app.get("/conversations")
 def get_conversations():
-
     db = SessionLocal()
 
     try:
@@ -193,24 +262,38 @@ def get_conversations():
             .all()
         )
 
-        return [
-            {
-                "id": c.id,
-                "created_at": c.created_at
-            }
-            for c in conversations
-        ]
+        result = []
+
+        for conversation in conversations:
+            first_message = (
+                db.query(Message)
+                .filter(
+                    Message.conversation_id == conversation.id
+                )
+                .order_by(Message.created_at)
+                .first()
+            )
+
+            result.append(
+                {
+                    "id": conversation.id,
+                    "title": (
+                        first_message.question[:70]
+                        if first_message
+                        else f"Conversation {conversation.id}"
+                    ),
+                    "created_at": conversation.created_at
+                }
+            )
+
+        return result
 
     finally:
         db.close()
 
 
-
-
-
 @app.get("/conversations/{conversation_id}")
 def get_conversation(conversation_id: int):
-
     db = SessionLocal()
 
     try:
@@ -223,6 +306,7 @@ def get_conversation(conversation_id: int):
 
         return [
             {
+                "id": message.id,
                 "question": message.question,
                 "answer": message.answer,
                 "created_at": message.created_at
@@ -232,9 +316,6 @@ def get_conversation(conversation_id: int):
 
     finally:
         db.close()
-
-
-
 
 
 @app.post("/documents/{document_id}/summary")
@@ -261,14 +342,24 @@ def generate_document_summary(document_id: int):
         if not chunks:
             return {"error": "No content found for this document"}
 
+        summary_chunks = []
+        total_characters = 0
+        max_characters = 18000
 
+        for chunk in chunks:
+            if total_characters + len(chunk.content) > max_characters:
+                break
 
+            summary_chunks.append(chunk)
+            total_characters += len(chunk.content)
 
         summary = generate_answer(
-            "Provide a concise summary of this document. "
+            "Provide a concise, grounded summary of this document. "
+            "Use only the supplied document evidence. "
             "Cover the main topic, key points, and important conclusions. "
-            "Do not add information that is not present in the document.",
-            chunks
+            "Do not invent statistics, facts, names, or conclusions. "
+            "If a requested type of information is not present, do not infer it.",
+            summary_chunks
         )
 
         return {
@@ -281,10 +372,8 @@ def generate_document_summary(document_id: int):
         db.close()
 
 
-
 @app.post("/documents/compare")
 def compare_documents_endpoint(request: CompareRequest):
-
     db = SessionLocal()
 
     try:
@@ -345,4 +434,3 @@ def compare_documents_endpoint(request: CompareRequest):
 
     finally:
         db.close()
-

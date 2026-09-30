@@ -2,11 +2,16 @@ import fitz
 import pytesseract
 from PIL import Image
 import io
-
+import re
 
 pytesseract.pytesseract.tesseract_cmd = (
     r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 )
+
+
+def clean_text(text: str):
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 
 def extract_chunks(file_path: str):
@@ -29,19 +34,34 @@ def extract_chunks(file_path: str):
 
             text = pytesseract.image_to_string(image).strip()
 
+        text = clean_text(text)
+
         if not text:
             continue
 
-        chunk_size = 1000
+        sentences = re.split(r'(?<=[.!?])\s+', text)
 
-        for i in range(0, len(text), chunk_size):
+        current_chunk = ""
 
-            chunk = text[i:i + chunk_size].strip()
+        for sentence in sentences:
 
-            if chunk:
-                chunks.append({
-                    "page_number": page_number,
-                    "content": chunk
-                })
+            if len(current_chunk) + len(sentence) <= 1200:
+                current_chunk += " " + sentence
+
+            else:
+
+                if current_chunk.strip():
+                    chunks.append({
+                        "page_number": page_number,
+                        "content": current_chunk.strip()
+                    })
+
+                current_chunk = sentence
+
+        if current_chunk.strip():
+            chunks.append({
+                "page_number": page_number,
+                "content": current_chunk.strip()
+            })
 
     return chunks
